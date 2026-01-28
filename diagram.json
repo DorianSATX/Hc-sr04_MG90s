@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "author": "Dorian",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp32", "top": 0, "left": 0 },
+    { "type": "wokwi-hc-sr04", "id": "ultrasonic", "top": -240, "left": -120 },
+    { "type": "wokwi-ssd1306", "id": "oled", "top": 340, "left": 0 },
+    { "type": "wokwi-servo", "id": "servo1", "top": 0, "left": 350 },
+    { "type": "wokwi-vcc", "id": "usb_pwr", "top": -150, "left": 350, "rotate": -90 },
+    { "type": "wokwi-gnd", "id": "usb_gnd", "top": -150, "left": 400, "rotate": 90 }
+  ],
+  "connections": [
+    
+    [ "usb_gnd:GND", "esp32:GND.1", "black", [ "v20", "h-50", "v180" ] ], 
+
+    [ "usb_gnd:GND", "ultrasonic:GND", "black", [ "v0" ] ],
+    [ "usb_pwr:VCC", "ultrasonic:VCC", "red", [ "v0" ] ],
+    [ "esp32:D13", "ultrasonic:TRIG", "blue", [ "h-40", "v-100" ] ],
+    [ "esp32:D12", "ultrasonic:ECHO", "green", [ "h-60", "v-120" ] ],
+
+    [ "usb_gnd:GND", "servo1:GND", "black", [ "v50", "h100" ] ],
+    [ "usb_pwr:VCC", "servo1:V+", "red", [ "v20", "h80" ] ],
+    [ "esp32:D14", "servo1:PWM", "orange", [ "h40", "v60" ] ],
+
+ 
+    [ "esp32:GND.3", "oled:GND", "black", [ "v100", "h-20" ] ],
+    [ "esp32:3V3", "oled:VCC", "red", [ "v120", "h-40" ] ],
+    [ "esp32:D4", "oled:SDA", "blue", [ "v60", "h20" ] ],
+    [ "esp32:D5", "oled:SCL", "yellow", [ "v80", "h40" ] ]
+  ]
+}
