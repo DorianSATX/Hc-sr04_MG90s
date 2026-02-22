@@ -6,11 +6,18 @@
 #include <NewPing.h>
 #include <ESP8266WiFi.h>
 #include <ArduinoOTA.h>
+#include <PubSubClient.h>
 #include "secrets.h" 
 
-// --- WIFI CREDENTIALS ---
+// --- WIFI & MQTT ---
 const char* ssid = SECRET_SSID;
 const char* password = SECRET_PASS;
+const char* mqtt_server = "192.168.1.XX"; // <-- Update to your HA/Mosquitto IP
+const char* mqtt_user = "your_mqtt_user"; // <-- Update
+const char* mqtt_pass = "mqttf50!!!";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
 
 // --- PIN DEFINITIONS ---
 #define TRIGGER_PIN  13 // D7
@@ -34,11 +41,34 @@ unsigned long detectionStartTime = 0;
 unsigned long lastTriggerTime = 0;
 unsigned long servoActionTimer = 0;
 bool hasTriggered = false;
+bool hasPublishedFlush = false; // <-- Added this
 int systemState = 0; 
 
 int getStableDistance() {
   int cm = sonar.convert_cm(sonar.ping_median(5)); 
   return (cm == 0 || cm > MAX_DISTANCE) ? 999 : cm;
+}
+
+void reconnect() {
+  if (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    
+    // Updated connect call:
+    // client.connect(deviceID, user, pass, willTopic, willQos, willRetain, willMessage)
+    if (client.connect("BathroomFlusher", mqtt_user, mqtt_pass, 
+                       "bathroom/flusher/status", 1, true, "offline")) {
+      
+      Serial.println("connected");
+      
+      // Publish "online" immediately upon connecting
+      client.publish("bathroom/flusher/status", "online", true);
+      
+      // Re-send discovery in case HA restarted
+      String discoveryTopic = "homeassistant/sensor/bathroom_flusher/config";
+      String payload = "{\"name\": \"Flush Event\", \"stat_t\": \"bathroom/flusher/event\", \"unique_id\": \"flusher_001\", \"dev\": {\"ids\": [\"flusher_001\"], \"name\": \"Bathroom Flusher\", \"mdl\": \"NodeMCU\", \"mf\": \"DIY\"}}";
+      client.publish(discoveryTopic.c_str(), payload.c_str(), true);
+    }
+  }
 }
 
 void setup() {
@@ -55,30 +85,47 @@ void setup() {
   unsigned long startAttemptTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
     delay(500);
-    Serial.print(".");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     ArduinoOTA.setHostname("bathroom-flusher");
     ArduinoOTA.begin();
+    
+    client.setServer(mqtt_server, 1883);
+
+    // --- HOME ASSISTANT MQTT DISCOVERY ---
+    // This tells HA that a sensor exists called "Flush Event"
+    if (client.connect("BathroomFlusher", mqtt_user, mqtt_pass)) {
+      // Configuration payload for a 'sensor'
+      String discoveryTopic = "homeassistant/sensor/bathroom_flusher/config";
+      String payload = "{\"name\": \"Flush Event\", \"stat_t\": \"bathroom/flusher/event\", \"unique_id\": \"flusher_001\", \"dev\": {\"ids\": [\"flusher_001\"], \"name\": \"Bathroom Flusher\", \"mdl\": \"NodeMCU\", \"mf\": \"DIY\"}}";
+      
+      client.publish(discoveryTopic.c_str(), payload.c_str(), true); // 'true' makes it persistent
+      client.publish("bathroom/flusher/status", "online", true);
+    }
 
     display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
     display.setTextSize(1);
     display.setCursor(0, 0);
-    display.println("WiFi Connected");
-    display.print("IP: "); 
-    display.println(WiFi.localIP()); 
+    display.println("WiFi & MQTT Connected");
     display.display();
-    delay(2000); 
+    delay(1500); 
   }
 
   myServo.attach(SERVO_PIN, 500, 2400); 
   myServo.write(0);
   lastTriggerTime = millis() - cooldownTime;
 }
+
 void loop() {
+  // Handle Background Tasks (OTA & MQTT)
   if (WiFi.status() == WL_CONNECTED) {
     ArduinoOTA.handle(); 
+    if (!client.connected()) {
+      reconnect();
+    }
+    client.loop();
   }
 
   unsigned long currentTime = millis();
@@ -93,6 +140,12 @@ void loop() {
 
   // --- STATE 1: FLUSHING ---
   if (systemState == 1) {
+    // MQTT: Publish the event only once per flush
+    if (!hasPublishedFlush) {
+      client.publish("bathroom/flusher/event", "flushed");
+      hasPublishedFlush = true;
+    }
+
     display.setTextSize(3);
     display.setCursor(10, 20);
     display.print("FLUSH!");
@@ -109,31 +162,25 @@ void loop() {
     display.print("RESETTING");
     if (currentTime - servoActionTimer >= 2000) { 
       systemState = 0;
+      hasPublishedFlush = false; // Reset for next flush
       lastTriggerTime = millis(); 
     }
   } 
   // --- STATE 0: IDLE / DETECTION ---
   else {
     if (currentTime - lastTriggerTime >= cooldownTime) {
-      // IF WE ARE IN THE MIDDLE OF A COUNTDOWN OR READY TO FLUSH
       if (distance <= threshold || hasTriggered) {
-        
         if (detectionStartTime == 0) detectionStartTime = currentTime;
         unsigned long elapsed = currentTime - detectionStartTime;
         
-        if (elapsed >= holdTime) {
-          hasTriggered = true;
-        }
+        if (elapsed >= holdTime) hasTriggered = true;
 
         if (hasTriggered) {
-          // --- STICKY LOGIC: WAITING FOR YOU TO WALK AWAY ---
           display.setTextSize(3);
           display.setCursor(15, 5);
           display.print("DONE!"); 
-          display.fillRect(0, 45, 128, 19, SSD1306_WHITE); // Bar stays full
+          display.fillRect(0, 45, 128, 19, SSD1306_WHITE);
 
-          // Trigger ONLY when you move away (Distance > threshold + buffer)
-          // We allow 999 here because if you leave, we WANT it to flush!
           if (distance > (threshold + buffer)) {
             myServo.write(180);
             servoActionTimer = currentTime;
@@ -142,7 +189,6 @@ void loop() {
             detectionStartTime = 0;
           }
         } else {
-          // --- STILL COUNTING DOWN ---
           display.setTextSize(3); 
           display.setCursor(15, 5);
           display.print("HOLD!"); 
@@ -151,25 +197,20 @@ void loop() {
         }
       } 
       else {
-        // --- IDLE / READY MODE ---
         display.setTextSize(2);
         display.setCursor(20, 5);
         display.print(distance); display.print(" cm"); 
-        
         display.setTextSize(2);
         display.setCursor(35, 35);
         display.print("READY");
-        
         detectionStartTime = 0; 
       }
     } 
     else {
-      // --- COOLDOWN MODE ---
       unsigned long rem = (cooldownTime - (currentTime - lastTriggerTime)) / 1000;
       display.setTextSize(1);
       display.setCursor(0, 0);
       display.println("RECHARGING");
-
       display.setTextSize(3); 
       display.setCursor(25, 25);
       display.print(rem); display.print("s");
