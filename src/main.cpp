@@ -16,6 +16,7 @@ TelnetSpy SerialAndTelnet;
 // --- FORWARD DECLARATIONS ---
 int getStableDistance();
 void reconnect();
+void onMqttMessage(char* topic, byte* payload, unsigned int length);
 void handleState0(unsigned long currentTime, int distance, bool updateDisplayNow);
 void handleState1(unsigned long currentTime, bool updateDisplayNow);
 void handleState2(unsigned long currentTime, bool updateDisplayNow);
@@ -62,8 +63,12 @@ unsigned long lastDisplayUpdate  = 0;
 unsigned long lastMqttAttempt    = 0;
 unsigned long lastPublishAttempt = 0;
 
-bool hasTriggered      = false;
-bool hasPublishedFlush = false;
+bool hasTriggered       = false;
+bool hasPublishedFlush  = false;
+
+// --- MQTT COMMAND (manual / HA-triggered flush) ---
+const char* COMMAND_TOPIC = "bathroom/flusher/command";
+bool        commandReceived = false;
 
 // systemState: 0 = IDLE/DETECT, 1 = FLUSHING, 2 = RESETTING
 int systemState = 0;
@@ -109,6 +114,7 @@ void setup() {
     ArduinoOTA.begin();
 
     client.setServer(mqtt_server, MQTT_PORT);
+     client.setCallback(onMqttMessage);
     reconnect();
   }
 
@@ -161,6 +167,25 @@ void loop() {
     case 1:  handleState1(currentTime, updateDisplayNow); break;
     case 2:  handleState2(currentTime, updateDisplayNow); break;
     default: handleState0(currentTime, distance, updateDisplayNow); break;
+  }
+
+  // --- MANUAL / HA-TRIGGERED FLUSH ---
+  // If an MQTT command arrived while idle, start a flush right away,
+  // regardless of the ultrasonic cooldown (the user explicitly asked for it).
+  if (commandReceived) {
+    commandReceived = false;
+
+     // Erase any retained command so a reconnect can't replay it
+    client.publish(COMMAND_TOPIC, "", true);
+    
+    if (systemState == 0) {
+      hasTriggered       = false;
+      detectionStartTime = 0;
+      departStartTime    = 0;
+      myServo.write(180);          // move servo to flush position
+      stateEntryTime     = currentTime;
+      systemState        = 1;      // enter the FLUSHING state (publishes event, retracts)
+    }
   }
 
   if (updateDisplayNow) {
@@ -315,5 +340,37 @@ void reconnect() {
                      "\"mdl\":\"NodeMCU\","
                      "\"mf\":\"DIY\"}}";
     client.publish(discoveryTopic.c_str(), payload.c_str(), true);
+
+    // --- HA discovery: manual flush button ---
+    String buttonTopic = "homeassistant/button/bathroom_flusher_flush/config";
+    String buttonPayload = "{\"name\":\"Flush\","
+                     "\"cmd_t\":\"bathroom/flusher/command\","
+                     "\"pl_prs\":\"flush\","
+                     "\"unique_id\":\"flusher_001_flush_btn\","
+                     "\"dev\":{\"ids\":[\"flusher_001\"],"
+                     "\"name\":\"Bathroom Flusher\","
+                     "\"mdl\":\"NodeMCU\","
+                     "\"mf\":\"DIY\"}}";
+    client.publish(buttonTopic.c_str(), buttonPayload.c_str(), true);
+    
+    // Subscribe to command topic so HA can trigger a flush on demand
+    client.subscribe(COMMAND_TOPIC);
+  }
+}
+
+// --- MQTT COMMAND CALLBACK ---
+// Called whenever a message arrives on any subscribed topic.
+void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+  if (strcmp(topic, COMMAND_TOPIC) != 0) return;
+  if (length == 0) return;          // our own retained-clear publish
+  
+  String msg;
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+  msg.trim();
+
+  // Accept common "trigger" values
+  if (msg.equalsIgnoreCase("on") || msg.equalsIgnoreCase("flush") ||
+      msg.equalsIgnoreCase("1") || msg.equalsIgnoreCase("true")) {
+    commandReceived = true;
   }
 }
