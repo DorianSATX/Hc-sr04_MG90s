@@ -261,15 +261,29 @@ void handleState0(unsigned long currentTime, int distance, bool updateDisplayNow
 
   if (hasTriggered) {
     display.setTextSize(3);
-    display.setCursor(15, 5);
-    display.print("DONE!");
-    display.fillRect(0, 45, 128, 19, SSD1306_WHITE);
+    if (departStartTime > 0) {
+      unsigned long gone = currentTime - departStartTime;
+      unsigned long left = (gone < departTime) ? (departTime - gone + 999) / 1000 : 0;
+      display.setCursor(0, 5);
+      display.print("FLUSH");
+      display.setCursor(92, 5);
+      display.print(left);
+      int drain = map(constrain(gone, 0UL, departTime), 0, departTime, 128, 0);
+      display.fillRect(0, 45, drain, 19, SSD1306_WHITE);
+    } else {
+      display.setCursor(15, 5);
+      display.print("DONE!");
+      display.fillRect(0, 45, 128, 19, SSD1306_WHITE);
+    }
 
   } else if (detectionStartTime > 0) {
     unsigned long elapsed = currentTime - detectionStartTime;
+    unsigned long remain  = (elapsed < holdTime) ? (holdTime - elapsed + 999) / 1000 : 0;
     display.setTextSize(3);
-    display.setCursor(15, 5);
+    display.setCursor(0, 5);
     display.print("HOLD!");
+    display.setCursor(92, 5);
+    display.print(remain);
     int barWidth = map(elapsed, 0, holdTime, 0, 128);
     display.fillRect(0, 45, constrain(barWidth, 0, 128), 19, SSD1306_WHITE);
 
