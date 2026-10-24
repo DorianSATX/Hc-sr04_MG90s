@@ -68,6 +68,9 @@ bool hasPublishedFlush  = false;
 
 // --- MQTT COMMAND (manual / HA-triggered flush) ---
 const char* COMMAND_TOPIC = "bathroom/flusher/command";
+const char* PRESENCE_TOPIC = "bathroom/flusher/presence";
+bool lastPresence         = false;
+bool forcePresencePublish = true;   // publish once after every (re)connect
 bool        commandReceived = false;
 
 // systemState: 0 = IDLE/DETECT, 1 = FLUSHING, 2 = RESETTING
@@ -114,6 +117,7 @@ void setup() {
     ArduinoOTA.begin();
 
     client.setServer(mqtt_server, MQTT_PORT);
+    client.setBufferSize(512);
      client.setCallback(onMqttMessage);
     reconnect();
   }
@@ -168,7 +172,14 @@ void loop() {
     case 2:  handleState2(currentTime, updateDisplayNow); break;
     default: handleState0(currentTime, distance, updateDisplayNow); break;
   }
-
+  // --- PRESENCE → MQTT (publish only when it changes) ---
+  bool present = (systemState == 0) && (detectionStartTime > 0 || hasTriggered);
+  if ((present != lastPresence || forcePresencePublish) && client.connected()) {
+    if (client.publish(PRESENCE_TOPIC, present ? "ON" : "OFF", true)) {
+      lastPresence = present;
+      forcePresencePublish = false;
+    }
+  }
   // --- MANUAL / HA-TRIGGERED FLUSH ---
   // If an MQTT command arrived while idle, start a flush right away,
   // regardless of the ultrasonic cooldown (the user explicitly asked for it).
@@ -352,6 +363,16 @@ void reconnect() {
                      "\"mdl\":\"NodeMCU\","
                      "\"mf\":\"DIY\"}}";
     client.publish(buttonTopic.c_str(), buttonPayload.c_str(), true);
+    // --- HA discovery: presence (occupancy) sensor ---
+    String presTopic = "homeassistant/binary_sensor/bathroom_flusher_presence/config";
+    String presPayload = "{\"name\":\"Presence\","
+                     "\"stat_t\":\"bathroom/flusher/presence\","
+                     "\"dev_cla\":\"occupancy\","
+                     "\"avty_t\":\"bathroom/flusher/status\","
+                     "\"unique_id\":\"flusher_001_presence\","
+                     "\"dev\":{\"ids\":[\"flusher_001\"]}}";
+    client.publish(presTopic.c_str(), presPayload.c_str(), true);
+    forcePresencePublish = true;
     
     // Subscribe to command topic so HA can trigger a flush on demand
     client.subscribe(COMMAND_TOPIC);
