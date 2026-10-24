@@ -271,8 +271,8 @@ void handleState0(unsigned long currentTime, int distance, bool updateDisplayNow
       int drain = map(constrain(gone, 0UL, departTime), 0, departTime, 128, 0);
       display.fillRect(0, 45, drain, 19, SSD1306_WHITE);
     } else {
-      display.setCursor(15, 5);
-      display.print("DONE!");
+      display.setCursor(10, 5);
+      display.print("ARMED!");
       display.fillRect(0, 45, 128, 19, SSD1306_WHITE);
     }
 
