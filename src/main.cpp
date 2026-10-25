@@ -20,6 +20,8 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length);
 void handleState0(unsigned long currentTime, int distance, bool updateDisplayNow);
 void handleState1(unsigned long currentTime, bool updateDisplayNow);
 void handleState2(unsigned long currentTime, bool updateDisplayNow);
+void checkTouch(unsigned long currentTime);
+void startFlush(unsigned long currentTime, const char* source);
 
 // --- WIFI & MQTT ---
 const char* ssid        = SECRET_SSID;
@@ -35,6 +37,7 @@ PubSubClient client(espClient);
 #define TRIGGER_PIN  13  // D7
 #define ECHO_PIN     12  // D6
 #define SERVO_PIN    14  // D5
+#define TOUCH_PIN    16  // D0 - TTP223 SIG (only safe free pin; D3/D4/D8 are boot pins)
 #define MAX_DISTANCE 150
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
@@ -53,6 +56,8 @@ const unsigned long resetSettleTime   = 2000;
 const unsigned long displayInterval   = 200;
 const unsigned long mqttRetryDelay    = 5000;
 const unsigned long publishRetryDelay = 500;
+const unsigned long touchHoldTime     = 150;    // must read touched on 2 loops in a row (sonar makes each loop ~0.3s)
+const unsigned long touchCooldown     = 15000;  // ignore touches this soon after any flush
 
 // --- STATE VARIABLES ---
 unsigned long detectionStartTime = 0;
@@ -72,6 +77,10 @@ const char* PRESENCE_TOPIC = "bathroom/flusher/presence";
 bool lastPresence         = false;
 bool forcePresencePublish = true;   // publish once after every (re)connect
 bool        commandReceived = false;
+
+// --- TOUCH BUTTON (TTP223 backup flush) ---
+unsigned long touchStart   = 0;
+bool          touchHandled = false;
 
 // systemState: 0 = IDLE/DETECT, 1 = FLUSHING, 2 = RESETTING
 int systemState = 0;
@@ -124,6 +133,8 @@ void setup() {
 
   myServo.attach(SERVO_PIN, 500, 2400);
   myServo.write(0);
+
+  pinMode(TOUCH_PIN, INPUT);  // TTP223 drives the line itself; keep hands off ~0.5s while it calibrates
 
   // lastTriggerTime == 0 means "never triggered" -> cooldown is clear on boot
   lastTriggerTime = 0;
@@ -189,15 +200,11 @@ void loop() {
      // Erase any retained command so a reconnect can't replay it
     client.publish(COMMAND_TOPIC, "", true);
     
-    if (systemState == 0) {
-      hasTriggered       = false;
-      detectionStartTime = 0;
-      departStartTime    = 0;
-      myServo.write(180);          // move servo to flush position
-      stateEntryTime     = currentTime;
-      systemState        = 1;      // enter the FLUSHING state (publishes event, retracts)
-    }
+    if (systemState == 0) startFlush(currentTime, "HA/MQTT command");
   }
+
+  // --- TOUCH BUTTON (backup for guests who leave before the sonar flushes) ---
+  checkTouch(currentTime);
 
   if (updateDisplayNow) {
     display.display();
@@ -240,13 +247,7 @@ void handleState0(unsigned long currentTime, int distance, bool updateDisplayNow
     if (departStartTime == 0) departStartTime = currentTime;
 
     if (currentTime - departStartTime >= departTime) {
-      Serial.println("--- Departure confirmed, flushing ---");
-      myServo.write(180);
-      stateEntryTime     = currentTime;
-      systemState        = 1;
-      hasTriggered       = false;
-      detectionStartTime = 0;
-      departStartTime    = 0;
+      startFlush(currentTime, "sonar departure");
       return;
     }
 
@@ -346,6 +347,41 @@ void handleState2(unsigned long currentTime, bool updateDisplayNow) {
 // ---------------------------------------------------------------------------
 // HELPERS
 // ---------------------------------------------------------------------------
+
+// One flush routine for every trigger (sonar, HA, touch) so they behave the same.
+void startFlush(unsigned long currentTime, const char* source) {
+  Serial.print("--- Flushing (");
+  Serial.print(source);
+  Serial.println(") ---");
+  hasTriggered       = false;
+  detectionStartTime = 0;
+  departStartTime    = 0;
+  myServo.write(180);            // move servo to flush position
+  stateEntryTime     = currentTime;
+  systemState        = 1;        // FLUSHING state publishes the event and retracts
+}
+
+// TTP223 touch pad: a deliberate press (seen on 2 consecutive loops) = flush, once per press.
+void checkTouch(unsigned long currentTime) {
+  if (digitalRead(TOUCH_PIN) != HIGH) {   // finger off the pad: reset
+    touchStart   = 0;
+    touchHandled = false;
+    return;
+  }
+  if (touchStart == 0) touchStart = currentTime;
+  if (touchHandled || currentTime - touchStart < touchHoldTime) return;
+
+  touchHandled = true;                    // only one action per press
+  bool recentFlush = (lastTriggerTime != 0) && (currentTime - lastTriggerTime < touchCooldown);
+  if (systemState != 0) {
+    Serial.println("Touch ignored: flush already in progress");
+  } else if (recentFlush) {
+    Serial.println("Touch ignored: flushed less than 15s ago");
+  } else {
+    startFlush(currentTime, "touch button");
+  }
+}
+
 int getStableDistance() {
   int cm = sonar.convert_cm(sonar.ping_median(9));
   return (cm == 0 || cm > MAX_DISTANCE) ? 999 : cm;
